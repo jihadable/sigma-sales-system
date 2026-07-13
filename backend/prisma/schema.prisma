@@ -1,0 +1,165 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============ MASTER DATA (sumber kebenaran untuk validasi & mapping, BUKAN hardcode) ============
+
+model Product {
+  id          Int      @id @default(autoincrement())
+  code        String   @unique
+  name        String
+  isBundle    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  prices       ProductPrice[]
+  bundleOf     BundleItem[]   @relation("BundleParent")
+  partOfBundle BundleItem[]   @relation("BundleChild")
+  orderItems   OrderItem[]
+}
+
+// HPP & harga jual bisa berbeda antar platform penjualan (WEB / TIKTOK SHOP / SHOPEE / dst)
+model ProductPrice {
+  id        Int     @id @default(autoincrement())
+  productId Int
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  platform  String
+  hpp       Decimal @db.Decimal(14, 2)
+  hargaJual Decimal? @db.Decimal(14, 2)
+
+  @@unique([productId, platform])
+}
+
+// Komposisi produk bundling: 1 produk bundle terdiri dari >=2 produk anak
+model BundleItem {
+  id              Int     @id @default(autoincrement())
+  bundleProductId Int
+  bundleProduct   Product @relation("BundleParent", fields: [bundleProductId], references: [id], onDelete: Cascade)
+  childProductId  Int
+  childProduct    Product @relation("BundleChild", fields: [childProductId], references: [id])
+  qty             Int     @default(1)
+  omzetSplit      Decimal? @db.Decimal(14, 2) // alokasi omzet utk anak ini saat bundle terjual
+  hppOverride     Decimal? @db.Decimal(14, 2) // override HPP anak jika beda dari master
+
+  @@unique([bundleProductId, childProductId])
+}
+
+// Master toko: normalisasi field "Toko" mentah (bisa berformat "PLATFORM|nama") + default admin & advertiser
+model Store {
+  id                Int     @id @default(autoincrement())
+  rawToko           String  @unique // nilai persis di kolom "Toko" file input
+  namaToko          String          // nama toko setelah dibersihkan, mis "TB", "RAYA", "SC"
+  platform          String          // WEB, TIKTOK SHOP, SHOPEE, dst
+  admin             String?         // PIC/admin default toko ini
+  defaultAdvertiser String?         // dipakai jika file input tidak punya kolom ADV
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+}
+
+// Normalisasi Provinsi -> Region (dipakai laporan Marketing)
+model RegionMapping {
+  id       Int    @id @default(autoincrement())
+  province String @unique
+  region   String
+}
+
+// ============ IMPORT / PROCESS LOG ============
+
+enum BatchStatus {
+  PENDING
+  PROCESSING
+  DONE
+  FAILED
+}
+
+model ImportBatch {
+  id           Int         @id @default(autoincrement())
+  fileDailyName   String?
+  fileMpName      String?
+  fileProdukName  String?
+  status       BatchStatus @default(PENDING)
+  totalRows    Int         @default(0)
+  successRows  Int         @default(0)
+  errorRows    Int         @default(0)
+  financeFilePath   String?
+  marketingFilePath String?
+  startedAt    DateTime?
+  finishedAt   DateTime?
+  createdAt    DateTime    @default(now())
+
+  orders Order[]
+  errors ImportError[]
+}
+
+model ImportError {
+  id         Int         @id @default(autoincrement())
+  batchId    Int
+  batch      ImportBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  sourceFile String      // DAILY | MP | PRODUK
+  rowNumber  Int
+  reason     String
+  rawData    Json?
+  createdAt  DateTime    @default(now())
+}
+
+// ============ TRANSACTIONAL DATA ============
+
+model Order {
+  id             Int      @id @default(autoincrement())
+  batchId        Int
+  batch          ImportBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  sourceFile     String   // DAILY | MP | PRODUK
+  orderNumber    String
+  awb            String?
+  tanggalPesanan DateTime
+  tanggalClosing DateTime
+  group          String?
+  kanal          String?
+  metodeBayar    String?
+  tokoRaw        String
+  namaToko       String?
+  platform       String?
+  typeTransaksi  String?
+  advertiser     String?
+  admin          String?
+  ekspedisi      String?
+  note           String?
+  kodePromo      String?
+  customerPhone  String?
+  customerName   String?
+  province       String?
+  region         String?
+  kabupaten      String?
+  kecamatan      String?
+  statusOrder    String?  @default("DELIVERY")
+  createdAt      DateTime @default(now())
+
+  items OrderItem[]
+
+  @@unique([orderNumber, sourceFile])
+  @@index([tanggalPesanan])
+}
+
+model OrderItem {
+  id                 Int      @id @default(autoincrement())
+  orderId            Int
+  order              Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId          Int?
+  product            Product? @relation(fields: [productId], references: [id])
+  productCode        String
+  productName        String
+  quantity           Int
+  unitPrice          Decimal  @db.Decimal(14, 2)
+  totalLine          Decimal  @db.Decimal(14, 2)
+  hpp                Decimal  @db.Decimal(14, 2)
+  isBundleChild       Boolean  @default(false)
+  parentProductCode   String?
+  createdAt          DateTime @default(now())
+
+  @@index([orderId])
+}
